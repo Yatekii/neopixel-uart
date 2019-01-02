@@ -1,0 +1,8 @@
+[package]
+name = "neopixel-uart"
+version = "0.1.0"
+authors = ["Noah Huesser <admin@yatekii.ch>"]
+edition = "2018"
+
+[dependencies]
+cortex-m = "*"

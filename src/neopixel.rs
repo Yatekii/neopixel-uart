@@ -1,5 +1,6 @@
 use core::cell::RefCell;
 use cortex_m::interrupt::{self, Mutex};
+use generic_array::{ GenericArray, ArrayLength, sequence::GenericSequence };
 
 pub type Generator = fn(strip_id: u8, strip_length: u8, frame_n: u32, pixel_n: u8) -> Option<BRG>;
 pub type Transfer = fn(buffer: &[u8], length: u32) -> Option<BRG>;
@@ -35,9 +36,40 @@ impl<'a> ReadWriteBuffer<'a> {
         if self.current_read_is_1 { &mut self.buffer_2 } else { &mut self.buffer_1 }
     }
 
-    pub fn swap(&mut self) { interrupt::free(|cs| self.current_read_is_1 = !self.current_read_is_1); }
+    pub fn swap(&mut self) { interrupt::free(|_cs| self.current_read_is_1 = !self.current_read_is_1); }
 
     pub fn length(&self) -> u16 { self.buffer_length }
+}
+
+pub struct Buf<N: ArrayLength<u8>> {
+    buf: GenericArray<u8, N>,
+    locked: bool,
+}
+
+impl<N: ArrayLength<u8>> Buf<N> {
+    pub const fn new() -> Buf<N> { Buf { locked: false, buf: GenericArray::generate(|_| 0) } }
+    
+    pub fn try_borrow_mut(&self) -> Option<&mut [u8]> {
+        interrupt::free(|_cs| {
+            if !self.locked {
+                unsafe {
+                    *(&self.locked as *const bool as *mut bool) = true;
+                    Some(&mut *(self.buf.as_slice() as *const [u8] as *mut [u8]))
+                }
+            } else {
+                None
+            }
+        })
+    }
+    
+    pub fn give_back(&self, buf: &mut [u8]) -> bool {
+        if self.buf.as_slice() as *const [u8] == buf as *const [u8] {
+            unsafe { *(&self.locked as *const bool as *mut bool) = false };
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -169,5 +201,43 @@ impl<'a> ChannelConfig<'a> {
         if !self.animation_ended() {
             self.start_transfer(transfer);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use heapless::consts::U8;
+    use crate::neopixel::Buf;
+    #[test]
+    fn can_borrow() {
+        let b = Buf::<U8>::new();
+        assert!(b.try_borrow_mut().is_some());
+    }
+    
+    #[test]
+    fn cant_borrow_twice() {
+        let b = Buf::<U8>::new();
+        b.try_borrow_mut().is_some();
+        assert!(b.try_borrow_mut().is_none());
+    }
+    
+    #[test]
+    fn can_take_back() {
+        let b = Buf::<U8>::new();
+        let a = b.try_borrow_mut().unwrap();
+        b.give_back(a);
+        assert!(b.try_borrow_mut().is_some());
+    }
+    
+    static buf: Buf<U8> = Buf::new();
+    
+    #[test]
+    fn a() {
+        assert!(buf.try_borrow_mut().is_some());
+    }
+    
+    #[test]
+    fn b() {
+        assert!(buf.try_borrow_mut().is_some());
     }
 }

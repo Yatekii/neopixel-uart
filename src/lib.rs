@@ -1,6 +1,8 @@
 #![no_std]
 
+mod brg;
 mod neopixel;
+pub use crate::neopixel::*;
 
 
 #[cfg(test)]

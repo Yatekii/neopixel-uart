@@ -11,34 +11,69 @@ pub enum DisplayType {
     Static(BRG)
 }
 
-pub struct ReadWriteBuffer<'a> {
+pub struct ReadWriteBuffer<N>
+where
+    N: ArrayLength<u8>
+{
     current_read_is_1: bool,
-    buffer_1: &'a mut [u8],
-    buffer_2: &'a mut [u8],
+    buffer_1: GenericArray<u8, N>,
+    buffer_2: GenericArray<u8, N>,
     buffer_length: u16,
+    needs_swap: bool,
 }
 
-impl<'a> ReadWriteBuffer<'a> {
-    pub fn new(buffer_1: &'a mut [u8], buffer_2: &'a mut [u8], buffer_length: u16) -> ReadWriteBuffer<'a> {
+impl<N> ReadWriteBuffer<N>
+where
+    N: ArrayLength<u8>
+{
+    pub fn new() -> ReadWriteBuffer<N> {
         Self {
             current_read_is_1: false,
-            buffer_1,
-            buffer_2,
-            buffer_length,
+            buffer_1: GenericArray::generate(|_| 0),
+            buffer_2: GenericArray::generate(|_| 0),
+            buffer_length: 0,
+            needs_swap: false,
         }
     }
 
     fn borrow(&self) -> &[u8] {
-        if self.current_read_is_1 { self.buffer_1 } else { self.buffer_2 }
+        if self.current_read_is_1 { &self.buffer_1 } else { &self.buffer_2 }
     }
 
     fn borrow_mut(&mut self) -> &mut [u8] {
         if self.current_read_is_1 { &mut self.buffer_2 } else { &mut self.buffer_1 }
     }
 
-    pub fn swap(&mut self) { interrupt::free(|_cs| self.current_read_is_1 = !self.current_read_is_1); }
+    pub fn request_swap(&mut self) {
+        self.needs_swap = true;
+    }
+
+    pub fn try_swap(&mut self) {
+        if self.needs_swap {
+            self.current_read_is_1 = !self.current_read_is_1;
+            self.needs_swap = false;
+        }
+        // TODO: Do we need a CS (calls in multiple ISRs)
+        //interrupt::free(|_cs| self.current_read_is_1 = !self.current_read_is_1);
+    }
 
     pub fn length(&self) -> u16 { self.buffer_length }
+}
+
+unsafe impl<'a, N> Send for Producer<'a, N> where N: ArrayLength<u8> {}
+pub struct Producer<'a, N>
+where
+    N: ArrayLength<u8>
+{
+    pub buf: &'a mut ChannelConfig<'a, N>,
+}
+
+unsafe impl<'a, N> Send for Consumer<'a, N> where N: ArrayLength<u8> {}
+pub struct Consumer<'a, N>
+where
+    N: ArrayLength<u8>
+{
+    pub buf: &'a mut ChannelConfig<'a, N>,
 }
 
 pub struct Buf<N: ArrayLength<u8>> {
@@ -47,10 +82,11 @@ pub struct Buf<N: ArrayLength<u8>> {
 }
 
 impl<N: ArrayLength<u8>> Buf<N> {
-    pub const fn new() -> Buf<N> { Buf { locked: false, buf: GenericArray::generate(|_| 0) } }
+    pub fn new() -> Buf<N> { Buf { locked: false, buf: GenericArray::generate(|_| 0) } }
     
     pub fn try_borrow_mut(&self) -> Option<&mut [u8]> {
-        interrupt::free(|_cs| {
+        // TODO:
+        // interrupt::free(|_cs| {
             if !self.locked {
                 unsafe {
                     *(&self.locked as *const bool as *mut bool) = true;
@@ -59,7 +95,7 @@ impl<N: ArrayLength<u8>> Buf<N> {
             } else {
                 None
             }
-        })
+        //})
     }
     
     pub fn give_back(&self, buf: &mut [u8]) -> bool {
@@ -97,10 +133,15 @@ impl BRG {
     }
 }
 
-pub struct ChannelConfig<'a> {
+pub struct ChannelConfig<'a, N>
+where
+    N: ArrayLength<u8>
+{
     strip_id: u8,
     // huart: &UART_HandleTypeDef,
-    buffer: ReadWriteBuffer<'a>,
+    buffer: ReadWriteBuffer<N>,
+    producer: Option<Producer<'a, N>>,
+    consumer: Option<Consumer<'a, N>>,
     frame_n: u32,
     calculate_frame: bool,
     last_frame_calculated: bool,
@@ -110,11 +151,16 @@ pub struct ChannelConfig<'a> {
     display_type: DisplayType
 }
 
-impl<'a> ChannelConfig<'a> {
-    pub fn new(strip_id: u8, buffer: ReadWriteBuffer<'a>, strip_length: u8) -> ChannelConfig<'a> {
+impl<'a, N> ChannelConfig<'a, N>
+where
+    N: ArrayLength<u8>
+{
+    pub fn new(strip_id: u8, buffer: ReadWriteBuffer<N>, strip_length: u8) -> ChannelConfig<'a, N> {
         ChannelConfig {
             strip_id: strip_id,
             buffer: buffer,
+            producer: None,
+            consumer: None,
             frame_n: 0,
             calculate_frame: true,
             last_frame_calculated: false,
@@ -123,6 +169,16 @@ impl<'a> ChannelConfig<'a> {
             brightness: 0,
             display_type: DisplayType::Static(BRG::off())
         }
+    }
+
+    pub fn take_consumer(&'a self) -> Option<Consumer<'a, N>> {
+        // TODO: Make safe
+        None
+    }
+
+    pub fn take_producer(&'a self) -> Option<Producer<'a, N>> {
+        // TODO: Make safe
+        None
     }
 
     const MASK: [u8; 2] = [0b11110, 0b10000];
@@ -170,9 +226,9 @@ impl<'a> ChannelConfig<'a> {
             self.frame_n += 1;
 
             // Signalize that the frame was calculated and we don't need to calculate another at the moment.
-            self.calculate_frame = false;	// work is done
+            self.calculate_frame = false;
             // Swap buffers
-            self.buffer.swap();
+            self.buffer.request_swap();
         }
     }
 
@@ -197,8 +253,9 @@ impl<'a> ChannelConfig<'a> {
     }
 
     // This callback should occur every 16.667ms to ensure 60fps
-    fn start_frame(&mut self, transfer: Transfer) {
+    pub fn start_frame(&mut self, transfer: Transfer) {
         if !self.animation_ended() {
+            self.buffer.try_swap();
             self.start_transfer(transfer);
         }
     }
@@ -228,16 +285,25 @@ mod tests {
         b.give_back(a);
         assert!(b.try_borrow_mut().is_some());
     }
-    
-    static buf: Buf<U8> = Buf::new();
-    
-    #[test]
-    fn a() {
-        assert!(buf.try_borrow_mut().is_some());
+
+    use lazy_static::lazy_static;
+    lazy_static! {
+        static ref buf: Buf<U8> = {
+            Buf::new()
+        };
     }
     
     #[test]
-    fn b() {
-        assert!(buf.try_borrow_mut().is_some());
+    fn shared_between_functions() {
+        fn a() {
+            assert!(buf.try_borrow_mut().is_some());
+        }
+        
+        fn b() {
+            assert!(buf.try_borrow_mut().is_none());
+        }
+
+        a();
+        b();
     }
 }

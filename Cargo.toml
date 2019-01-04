@@ -7,5 +7,5 @@ edition = "2018"
 [dependencies]
 cortex-m = "*"
 generic-array = "*"
-heapless = "*"
+typenum = "*"
 lazy_static = "*"

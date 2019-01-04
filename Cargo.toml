@@ -9,3 +9,10 @@ cortex-m = "*"
 generic-array = "*"
 typenum = "*"
 lazy_static = "*"
+
+[dev-dependencies]
+panic-halt = "0.2.0"
+
+[dev-dependencies.stm32f0]
+features = ["stm32f0x2", "rt"]
+version = "*"

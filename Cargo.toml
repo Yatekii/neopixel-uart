@@ -12,7 +12,10 @@ lazy_static = "*"
 
 [dev-dependencies]
 panic-halt = "0.2.0"
+cortex-m-rt = "*"
+nb = "*"
 
-[dev-dependencies.stm32f0]
-features = ["stm32f0x2", "rt"]
+[dev-dependencies.stm32f0xx-hal]
+path = "../stm32f0xx-hal"
+features = ["stm32f072", "rt"]
 version = "*"
